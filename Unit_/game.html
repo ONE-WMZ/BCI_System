@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>SSVEP控制贪吃蛇</title>
+<style>
+body{
+    margin:0;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    height:100vh;
+    background:#111;
+    color:white;
+}
+canvas{
+    background:#0f0f23;
+    border:4px solid white;
+}
+#status{
+    margin-top:5px;
+    color:#ffd700;
+}
+</style>
+</head>
+
+<body>
+<div>
+<canvas id="gameCanvas" width="600" height="600"></canvas>
+<div>得分: <span id="score">0</span></div>
+<div id="status">状态: READY</div>
+</div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const GRID = 20;
+const CELL = canvas.width / GRID;
+
+let snake, food, dir, score, gameRunning;
+let ws;
+
+// ⭐ 复用canvas（性能优化）
+const tempCanvas = document.createElement('canvas');
+tempCanvas.width = 300;
+tempCanvas.height = 300;
+const tempCtx = tempCanvas.getContext('2d');
+
+// 初始化
+function initGame(){
+    snake=[{x:10,y:10},{x:9,y:10},{x:8,y:10}];
+    dir='right';
+    score=0;
+    gameRunning=true;
+
+    spawnFood();
+    updateScore();
+    updateStatus("RUNNING");
+
+    draw();
+}
+
+// 食物
+function spawnFood(){
+    food={
+        x:Math.floor(Math.random()*GRID),
+        y:Math.floor(Math.random()*GRID)
+    };
+}
+
+// 移动
+function move(d){
+    if(!gameRunning) return;
+
+    const opp={up:'down',down:'up',left:'right',right:'left'};
+    if(opp[d]===dir) return;
+
+    dir=d;
+
+    let head={...snake[0]};
+    if(dir==='up') head.y--;
+    if(dir==='down') head.y++;
+    if(dir==='left') head.x--;
+    if(dir==='right') head.x++;
+
+    // 碰撞
+    if(head.x<0||head.y<0||head.x>=GRID||head.y>=GRID||
+       snake.some(s=>s.x===head.x&&s.y===head.y)){
+        return gameOver();
+    }
+
+    snake.unshift(head);
+
+    if(head.x===food.x && head.y===food.y){
+        score++;
+        updateScore();
+        spawnFood();
+        sendScore("RUNNING");
+    }else{
+        snake.pop();
+    }
+
+    draw();
+}
+
+// 分数
+function updateScore(){
+    document.getElementById('score').textContent=score;
+}
+
+// 状态显示
+function updateStatus(s){
+    document.getElementById('status').textContent = "状态: " + s;
+}
+
+// 游戏结束
+function gameOver(){
+    gameRunning=false;
+
+    updateStatus("GAME OVER");
+    sendScore("GAME_OVER");
+
+    setTimeout(()=>initGame(),1000);
+}
+
+// ⭐ 发送分数（已统一字段）
+function sendScore(status){
+    if(ws && ws.readyState===1){
+        ws.send(JSON.stringify({
+            type:"score",
+            score: score,   // ✅ 改回 score
+            status: status
+        }));
+    }
+}
+
+// 绘制
+function draw(){
+    ctx.fillStyle='#0f0f23';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // 蛇
+    snake.forEach((s,i)=>{
+        ctx.fillStyle = (i===0)?'#ffd700':'#4caf50';
+        ctx.fillRect(s.x*CELL,s.y*CELL,CELL-2,CELL-2);
+    });
+
+    // 食物
+    ctx.fillStyle='#ff6b6b';
+    ctx.fillRect(food.x*CELL,food.y*CELL,CELL-2,CELL-2);
+}
+
+// WebSocket
+function connectWS(){
+    ws=new WebSocket('ws://localhost:8765');
+
+    ws.onopen=()=>{
+        console.log("WS连接成功");
+        startStream();
+    };
+
+    ws.onmessage=(e)=>{
+        try{
+            let d=JSON.parse(e.data);
+            if(d.type==="control"){
+                move(d.direction);
+            }else if(d.type==="shutdown"){
+                console.log("收到关闭指令，即将关闭页面");
+                updateStatus("TASK ENDED");
+                window.close();
+            }
+        }catch{}
+    };
+
+    ws.onclose=()=>{
+        console.log("WS断开，重连中...");
+        setTimeout(connectWS,2000);
+    };
+}
+
+// ⭐ 视频流（优化：复用canvas）
+function startStream(){
+    function send(){
+        if(ws.readyState!==1){
+            requestAnimationFrame(send);
+            return;
+        }
+
+        tempCtx.drawImage(canvas,0,0,300,300);
+
+        tempCanvas.toBlob(b=>{
+            if(b) ws.send(b);
+        },'image/jpeg',0.7);
+
+        requestAnimationFrame(send);
+    }
+    send();
+}
+
+// 启动
+initGame();
+connectWS();
+
+// 键盘调试
+window.addEventListener('keydown',e=>{
+    const m={
+        ArrowUp:'up',ArrowDown:'down',
+        ArrowLeft:'left',ArrowRight:'right',
+        w:'up',s:'down',a:'left',d:'right'
+    };
+    if(m[e.key]){
+        e.preventDefault();
+        move(m[e.key]);
+    }
+});
+</script>
+</body>
+</html>
