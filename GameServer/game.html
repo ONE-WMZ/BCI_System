@@ -39,9 +39,13 @@ const GRID = 20;
 const CELL = canvas.width / GRID;
 
 let snake, food, dir, score, gameRunning;
-let ws;
+let commandWs;
+let frameWs;
+let streamStarted = false;
+let lastFrameTime = 0;
+const FRAME_INTERVAL_MS = 100;
 
-// ⭐ 复用canvas（性能优化）
+//  复用canvas
 const tempCanvas = document.createElement('canvas');
 tempCanvas.width = 300;
 tempCanvas.height = 300;
@@ -124,12 +128,12 @@ function gameOver(){
     setTimeout(()=>initGame(),1000);
 }
 
-// ⭐ 发送分数（已统一字段）
+// 发送分数
 function sendScore(status){
-    if(ws && ws.readyState===1){
-        ws.send(JSON.stringify({
+    if(commandWs && commandWs.readyState===1){
+        commandWs.send(JSON.stringify({
             type:"score",
-            score: score,   // ✅ 改回 score
+            score: score,
             status: status
         }));
     }
@@ -151,16 +155,16 @@ function draw(){
     ctx.fillRect(food.x*CELL,food.y*CELL,CELL-2,CELL-2);
 }
 
-// WebSocket
-function connectWS(){
-    ws=new WebSocket('ws://localhost:8765');
+// Command connection: the server receives commands on port 8765.
+function connectCommandWS(){
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    commandWs = new WebSocket(`${scheme}://${location.hostname}:8765/ws/command?role=game`);
 
-    ws.onopen=()=>{
-        console.log("WS连接成功");
-        startStream();
+    commandWs.onopen=()=>{
+        console.log("命令服务已连接");
     };
 
-    ws.onmessage=(e)=>{
+    commandWs.onmessage=(e)=>{
         try{
             let d=JSON.parse(e.data);
             if(d.type==="control"){
@@ -168,30 +172,43 @@ function connectWS(){
             }else if(d.type==="shutdown"){
                 console.log("收到关闭指令，即将关闭页面");
                 updateStatus("TASK ENDED");
-                window.close();
+                commandWs.close();
             }
         }catch{}
     };
 
-    ws.onclose=()=>{
-        console.log("WS断开，重连中...");
-        setTimeout(connectWS,2000);
+    commandWs.onclose=()=>{
+        console.log("命令服务断开，2 秒后重连");
+        setTimeout(connectCommandWS,2000);
     };
 }
 
-// ⭐ 视频流（优化：复用canvas）
+// Frame connection: game frames are published on port 8766.
+function connectFrameWS(){
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    frameWs = new WebSocket(`${scheme}://${location.hostname}:8766/ws/frame?role=source`);
+    frameWs.binaryType = 'arraybuffer';
+    frameWs.onopen=()=>console.log("画面帧服务已连接");
+    frameWs.onclose=()=>{
+        console.log("画面帧服务断开，2 秒后重连");
+        setTimeout(connectFrameWS,2000);
+    };
+}
+
+// Publish a JPEG frame up to 10 times per second.
 function startStream(){
+    if(streamStarted) return;
+    streamStarted = true;
+
     function send(){
-        if(ws.readyState!==1){
-            requestAnimationFrame(send);
-            return;
+        const now = performance.now();
+        if(frameWs && frameWs.readyState===WebSocket.OPEN && now-lastFrameTime>=FRAME_INTERVAL_MS){
+            lastFrameTime = now;
+            tempCtx.drawImage(canvas,0,0,300,300);
+            tempCanvas.toBlob(b=>{
+                if(b && frameWs && frameWs.readyState===WebSocket.OPEN) frameWs.send(b);
+            },'image/jpeg',0.7);
         }
-
-        tempCtx.drawImage(canvas,0,0,300,300);
-
-        tempCanvas.toBlob(b=>{
-            if(b) ws.send(b);
-        },'image/jpeg',0.7);
 
         requestAnimationFrame(send);
     }
@@ -200,7 +217,9 @@ function startStream(){
 
 // 启动
 initGame();
-connectWS();
+connectCommandWS();
+connectFrameWS();
+startStream();
 
 // 键盘调试
 window.addEventListener('keydown',e=>{
@@ -214,6 +233,7 @@ window.addEventListener('keydown',e=>{
         move(m[e.key]);
     }
 });
+
 </script>
 </body>
 </html>

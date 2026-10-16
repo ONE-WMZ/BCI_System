@@ -1,21 +1,15 @@
 import os
 import csv
-import cv2
 import time
 import json
 import traceback
-import asyncio
-import websockets
-import threading
-import webbrowser
 import numpy as np
-import http.server
-import socketserver
 from datetime import datetime
 from psychopy import core, event, visual
 
 from Unit_.LSL_ import LSL_Recorder
 from Unit_.Stimuli_ import Stimuli_SSVEP
+from Unit_.Get_Frame import Get_Camera, Get_Frame
 
 
 def Task_collect(info_):    
@@ -44,6 +38,7 @@ def Task_collect(info_):
     events = []
     freqs_list = None
 
+    # ! save person info
     def _save_person_info():
         experiment_info = {
             "ID": info_.get("ID"),
@@ -58,6 +53,7 @@ def Task_collect(info_):
             json.dump(experiment_info, f, indent=4, ensure_ascii=False)
         print("[Collect] person_info.json saved")
 
+    # ! save events
     def _save_events_csv():
         if not events:
             print("[Collect] Warning: No events to save")
@@ -120,7 +116,7 @@ def Task_collect(info_):
                     "data_shape": data_shape,
                 })
         except KeyboardInterrupt:
-            print("[Escape] The experiment was interrupted by the user")
+            print("[Escape key]")
         except Exception as e:
             print(f"[ERROR] Exception during SSVEP collection: {e}")
             traceback.print_exc()
@@ -133,58 +129,18 @@ def Task_collect(info_):
 
     # ! PD-SSVEP
     elif Task == "PD-SSVEP":
+        frame_client = None
         try:
-            global latest_frame, clients
-            latest_frame = None
-            clients = set()
-            # WebSocket (get image + send control)
-            async def handler(websocket):
-                global latest_frame, clients
-                clients.add(websocket)
-                try:
-                    async for message in websocket:
-                        try:
-                            #  get image (bit-2)
-                            if isinstance(message, bytes):
-                                np_arr = np.frombuffer(message, np.uint8)
-                                frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                                if frame is not None:
-                                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                    frame = frame.astype(np.float32) / 127.5 - 1.0
-                                    frame = cv2.flip(frame, 0)   # Vertical flip
-                                    latest_frame = frame
-                        except:
-                            pass
-                finally:
-                    clients.remove(websocket)
-            async def start_ws():
-                async with websockets.serve(handler, "localhost", 8765):
-                    print("WebSocket started: ws://localhost:8765")
-                    await asyncio.Future()
-            threading.Thread(
-                target=lambda: asyncio.run(start_ws()),
-                daemon=True
-            ).start()
-            # HTTP (load HTML)
-            def start_http():
-                PORT = 8000
-                Handler = http.server.SimpleHTTPRequestHandler
-                with socketserver.TCPServer(("", PORT), Handler) as httpd:
-                    print("HTTP server: http://localhost:8000")
-                    httpd.serve_forever()
-            threading.Thread(target=start_http, daemon=True).start()
-            # auto open html
-            def open_browser():
-                time.sleep(1.0)
-                webbrowser.open("http://localhost:8000/Viz_/Unit_/game.html")
-
-            threading.Thread(target=open_browser, daemon=True).start()
+            frame_client = (Get_Camera(int(info_.get("Camera_Index", 1)))
+                            if info_.get("Use_Camera", False)
+                            else Get_Frame(info_.get("Frame_API", "")))
+            frame_client.start()
             # SSVEP
             stimuli = Stimuli_SSVEP(block_size=200)
             freqs_list = stimuli.freqs
             stimuli_dict = stimuli.create_stimuli()
 
-            # Save person_info.json early — before the task loop
+            # Save person_info.json
             _save_person_info()
 
             # game block
@@ -221,6 +177,7 @@ def Task_collect(info_):
                     t = stim_clock.getTime()
                     stimuli.update_stimuli(stimuli_dict, t)
                     # game
+                    latest_frame = frame_client.get_frame()
                     if latest_frame is not None:
                         game_stim.image = latest_frame
                     border.draw()
@@ -255,6 +212,8 @@ def Task_collect(info_):
             traceback.print_exc()
         finally:
             _save_events_csv()
+            if frame_client is not None:
+                frame_client.stop()
             try:
                 stimuli.exit()
             except BaseException:
@@ -265,4 +224,4 @@ def Task_collect(info_):
         pass
     
     _save_events_csv()
-    print("[Collect] Task finished.")
+    print("[Collect End]")

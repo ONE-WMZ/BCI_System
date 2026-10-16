@@ -1,7 +1,12 @@
 import os 
+import asyncio
+import json
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog
+import websockets
+from urllib.request import Request, urlopen
 
 from Unit_.LSL_ import LSL_Recorder
 from screeninfo import get_monitors
@@ -37,6 +42,11 @@ class SSVEP_GUI:
             "Win_len": tk.DoubleVar(value=float(shared_info.get("Win_len", 2.0))),
             "Step_len": tk.DoubleVar(value=float(shared_info.get("Step_len", 0.1))),
             "Task": tk.StringVar(value=str(shared_info.get("Task", ""))),
+            "Frame_API": tk.StringVar(value=str(shared_info.get("Frame_API", ""))),
+            "Use_Camera": tk.BooleanVar(value=bool(shared_info.get("Use_Camera", False))),
+            "Camera_Index": tk.IntVar(value=int(shared_info.get("Camera_Index", 1))),
+            "Camera_Index_Text": tk.StringVar(value=str(shared_info.get("Camera_Index", 1))),
+            "Command_API": tk.StringVar(value=str(shared_info.get("Command_API") or "")),
             "Task_Duration": tk.DoubleVar(value=float(shared_info.get("Task_Duration", 10.0))),
             "Rest_Duration": tk.DoubleVar(value=float(shared_info.get("Rest_Duration", 2.0))),
             "Analysis_Results": {
@@ -76,10 +86,10 @@ class SSVEP_GUI:
         }
         # ! Scan_screen
         self.Scan_screen()
-        # ! Build GUI
-        self._build_gui()
         # ! Setup status bar
         self._setup_status_bar()
+        # ! Build GUI after reserving space for the bottom status bar
+        self._build_gui()
         self._install_resize_scaling()
 
     # ! Setup
@@ -439,7 +449,11 @@ class SSVEP_GUI:
     # ! global Methods 
     def update_status(self, message, color="black"):
         # updata status
-        self.status_bar.config(text=f"  {message}", fg=color)
+        self.status_bar.config(
+            text=f"  {message}",
+            fg=color,
+            wraplength=max(400, self.root.winfo_width() - 40),
+        )
         self.status_bar.update_idletasks()
     
     def select_folder(self):
@@ -467,7 +481,7 @@ class SSVEP_GUI:
     def print_info(self):
         # print all info
         if self.info["Name"].get() == "" or self.info["ID"].get() == "":
-            messagebox.showwarning("Incomplete Information", "Please fill in all personal information!")
+            self.update_status("Please fill in all personal information.", "red")
             return
         def extract_values(data):
             if hasattr(data, 'get') and not hasattr(data, 'keys'):
@@ -482,7 +496,6 @@ class SSVEP_GUI:
         current_values = extract_values(self.info)
         print(current_values)
         self.update_status(f"Information saved for Subject: {self.info['Name'].get()}", "green")
-        messagebox.showinfo("Success", f"Information saved successfully!\nSubject: {self.info['Name'].get()}")
     
     def scan_lsl_devices(self):
         # scan lsl
@@ -505,31 +518,65 @@ class SSVEP_GUI:
                                         foreground="green")
             self.update_status(f"Found {len(streams)} LSL device(s)", "green")
         except Exception as e:
-            messagebox.showerror("Scan Error", f"Failed to scan LSL streams:\n{e}")
             self.lsl_status_label.config(text="❌ Status: Scan Failed", foreground="red")
-            self.update_status("Scan failed", "red")
+            self.update_status(f"Failed to scan LSL streams: {e}", "red")
     
     def connect_lsl_device(self):
         # connect lsl
         selection = self.device_listbox.curselection()
         if not selection or len(self.found_streams) == 0:
-            messagebox.showwarning("Warning", "Please select a device from the list first!")
+            self.update_status("Please select a device from the list first.", "red")
             return
         selected_index = selection[0]
         selected_stream = self.found_streams[selected_index]
         device_name = selected_stream['name']
         try:
             self.recorder = LSL_Recorder(stream_name=device_name, channels=None)
-            messagebox.showinfo("Success", f"Successfully connected to:\n{device_name}")
             self.info["Device_name"].set(device_name)
             self.info["Device_status"].set("Connected")
             self.lsl_status_label.config(text=f"🔗 Status: Connected to {device_name}", 
                                         foreground="blue")
             self.update_status(f"Connected to device: {device_name}", "blue")
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect:\n{e}")
             self.lsl_status_label.config(text="❌ Status: Connect Failed", foreground="red")
-            self.update_status("Connection failed", "red")
+            self.update_status(f"Failed to connect to {device_name}: {e}", "red")
+
+    def _validate_lsl_connection(self):
+        device_name = self.info["Device_name"].get().strip()
+        if self.info["Device_status"].get() != "Connected" or not device_name:
+            self.update_status("Connect an LSL device before starting this task.", "red")
+            return False
+
+        try:
+            available_names = {stream["name"] for stream in LSL_Recorder.search_streams()}
+        except Exception as exc:
+            self.update_status(f"Could not verify the LSL connection: {exc}", "red")
+            return False
+
+        if device_name not in available_names:
+            self.info["Device_status"].set("Disconnected")
+            self.update_status(
+                f"LSL device '{device_name}' is no longer available. Reconnect the device.",
+                "red",
+            )
+            return False
+        return True
+
+    def _validate_camera_index(self):
+        if self.info["Task"].get() != "PD-SSVEP" or not self.info["Use_Camera"].get():
+            return True
+        value = self.info["Camera_Index_Text"].get().strip()
+        try:
+            camera_index = int(value)
+        except ValueError:
+            self.update_status("Camera index must be a non-negative integer.", "red")
+            return False
+        if camera_index < 0:
+            self.update_status("Camera index must be a non-negative integer.", "red")
+            return False
+        self.info["Camera_Index"].set(camera_index)
+        self.info["Camera_Index_Text"].set(str(camera_index))
+        return True
     
     def save_to_shared(self):
         # save shared info
@@ -546,6 +593,11 @@ class SSVEP_GUI:
         self.shared_info["Algorithm"] = self.info["Algorithm"].get()
         self.shared_info["Threshold"] = float(self.info["Threshold"].get())
         self.shared_info["Task"] = self.info["Task"].get()
+        self.shared_info["Frame_API"] = self.info["Frame_API"].get().strip()
+        self.shared_info["Use_Camera"] = self.info["Use_Camera"].get()
+        self.shared_info["Camera_Index"] = self.info["Camera_Index"].get()
+        command_api = self.info["Command_API"].get().strip()
+        self.shared_info["Command_API"] = command_api or None
         self.shared_info["Task_Duration"] = float(self.info["Task_Duration"].get())
         self.shared_info["Rest_Duration"] = float(self.info["Rest_Duration"].get())
         self.shared_info["Analysis_Results"] = {
@@ -599,6 +651,11 @@ class SSVEP_GUI:
         self.info["Win_len"].set(float(self.shared_info.get("Win_len", 2.0)))
         self.info["Step_len"].set(float(self.shared_info.get("Step_len", 0.1)))
         self.info["Task"].set(str(self.shared_info.get("Task", "")))
+        self.info["Frame_API"].set(str(self.shared_info.get("Frame_API", "")))
+        self.info["Use_Camera"].set(bool(self.shared_info.get("Use_Camera", False)))
+        self.info["Camera_Index"].set(int(self.shared_info.get("Camera_Index", 1)))
+        self.info["Camera_Index_Text"].set(str(self.shared_info.get("Camera_Index", 1)))
+        self.info["Command_API"].set(str(self.shared_info.get("Command_API") or ""))
         self.info["Task_Duration"].set(float(self.shared_info.get("Task_Duration", 10.0)))
         self.info["Rest_Duration"].set(float(self.shared_info.get("Rest_Duration", 2.0)))
 
@@ -748,15 +805,52 @@ class SSVEP_GUI:
         task_frame = ttk.Frame(main_frame)
         task_frame.pack(fill='x', pady=self.sp(10))
         ttk.Label(task_frame, text="🎯 Task:", font=self.fonts['label'],
-                 width=18, anchor='e').pack(side='left', padx=(0, self.sp(12)))
+                 width=18, anchor='e').grid(row=0, column=0, padx=(0, self.sp(12)), sticky='e')
         task_combo = ttk.Combobox(task_frame, textvariable=self.info["Task"],
                                   values=["", "SSVEP", "PD-SSVEP", "MI"], width=20,
                                   font=self.fonts['entry'], state="readonly")
-        task_combo.pack(side='left', padx=(0, self.sp(12)))
+        task_combo.grid(row=0, column=1, padx=(0, self.sp(12)), sticky='w')
         task_combo.current(0)
         preview_btn = ttk.Button(task_frame, text="👁 Preview",
                                 command=self.preview_task, width=10)
-        preview_btn.pack(side='left')
+        preview_btn.grid(row=0, column=2, sticky='w')
+        frame_api_frame = ttk.Frame(main_frame)
+        frame_api_frame.columnconfigure(1, weight=1)
+        frame_api_label = ttk.Label(frame_api_frame, text="Frame API:", font=self.fonts['label'],
+                                    width=18, anchor='e')
+        frame_api_label.grid(
+                      row=0, column=0, rowspan=2, padx=(0, self.sp(12)), sticky='e')
+        frame_api_entry = ttk.Entry(frame_api_frame, textvariable=self.info["Frame_API"],
+                                    width=34, font=self.fonts['entry'])
+        frame_api_entry.grid(
+                      row=0, column=1, sticky='ew')
+        camera_checkbox = tk.Checkbutton(
+            frame_api_frame,
+            text="Use camera",
+            variable=self.info["Use_Camera"],
+            command=lambda: update_source_mode(),
+            font=self.fonts["label_small"],
+            bg=self.colors["bg"],
+            fg=self.colors["primary"],
+            activebackground=self.colors["bg"],
+            selectcolor=self.colors["white"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            padx=self.sp(6),
+            pady=self.sp(2),
+        )
+        camera_checkbox.grid(row=0, column=2, padx=(self.sp(10), 0), sticky='w')
+
+        def update_source_mode():
+            if self.info["Use_Camera"].get():
+                frame_api_label.config(text="Camera Index:")
+                frame_api_entry.configure(textvariable=self.info["Camera_Index_Text"])
+            else:
+                frame_api_label.config(text="Frame API:")
+                frame_api_entry.configure(textvariable=self.info["Frame_API"])
+
+        update_source_mode()
         # Row 3: Task Duration and Rest Duration
         duration_frame = ttk.Frame(main_frame)
         duration_frame.pack(fill='x', pady=self.sp(10))
@@ -771,6 +865,14 @@ class SSVEP_GUI:
         rest_duration_entry = ttk.Entry(duration_frame, textvariable=self.info["Rest_Duration"],
                                         width=10, font=self.fonts['entry'])
         rest_duration_entry.pack(side='left')
+        def update_collect_frame_api(*_args):
+            if self.info["Task"].get() == "PD-SSVEP":
+                if not frame_api_frame.winfo_manager():
+                    frame_api_frame.pack(fill='x', pady=self.sp(10), before=duration_frame)
+            else:
+                frame_api_frame.pack_forget()
+        self.info["Task"].trace_add("write", update_collect_frame_api)
+        update_collect_frame_api()
         self.info["Rest_Duration"].set("2.0")
         # Row 4: Collect button
         collect_btn = ttk.Button(main_frame, text="⏺ Start Collection",
@@ -937,53 +1039,180 @@ class SSVEP_GUI:
                                   font=self.fonts['entry'], state="readonly")
         task_combo.grid(row=0, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
         task_combo.current(0)
+        # Frame API is shown only when PD-SSVEP is selected.
+        frame_api_label = ttk.Label(form_frame, text="Frame API:", font=self.fonts['subtitle'])
+        frame_api_label.grid(row=1, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+        frame_api_controls = ttk.Frame(form_frame)
+        frame_api_controls.grid(row=1, column=1, padx=self.sp(12), pady=self.sp(7), sticky='ew')
+        frame_api_controls.columnconfigure(0, weight=1)
+        frame_api_entry = ttk.Entry(frame_api_controls, textvariable=self.info["Frame_API"],
+                                    width=34, font=self.fonts['entry'])
+        frame_api_entry.grid(row=0, column=0, sticky='ew')
+        camera_checkbox = tk.Checkbutton(
+            frame_api_controls,
+            text="Use camera",
+            variable=self.info["Use_Camera"],
+            command=lambda: update_source_mode(),
+            font=self.fonts["label_small"],
+            bg=self.colors["bg"],
+            fg=self.colors["primary"],
+            activebackground=self.colors["bg"],
+            selectcolor=self.colors["white"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            padx=self.sp(6),
+            pady=self.sp(2),
+        )
+        camera_checkbox.grid(row=0, column=1, padx=(self.sp(10), 0), sticky='w')
+
+        def update_source_mode():
+            if self.info["Use_Camera"].get():
+                frame_api_label.config(text="Camera Index:")
+                frame_api_entry.configure(textvariable=self.info["Camera_Index_Text"])
+            else:
+                frame_api_label.config(text="Frame API:")
+                frame_api_entry.configure(textvariable=self.info["Frame_API"])
+
+        update_source_mode()
+
+        def update_realtime_frame_api(*_args):
+            visible = self.info["Task"].get() == "PD-SSVEP"
+            if visible:
+                frame_api_label.grid()
+                frame_api_controls.grid()
+            else:
+                frame_api_label.grid_remove()
+                frame_api_controls.grid_remove()
+        self.info["Task"].trace_add("write", update_realtime_frame_api)
+        update_realtime_frame_api()
         # Screen selection
         self.Scan_screen()
         ttk.Label(form_frame, text="🖥 Screen:", font=self.fonts['subtitle']).grid(
-            row=1, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+            row=2, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
         screen_combo = ttk.Combobox(form_frame, textvariable=self.info["Select_screen"],
                                     values=self.screen_list, width=25,
                                     font=self.fonts['entry'], state="readonly")
-        screen_combo.grid(row=1, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        screen_combo.grid(row=2, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
         if self.screen_list:
             screen_combo.current(0)
         # Algorithm selection
         ttk.Label(form_frame, text="🧠 Algorithm:", font=self.fonts['subtitle']).grid(
-            row=2, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+            row=3, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
         algo_combo = ttk.Combobox(form_frame, textvariable=self.info["Algorithm"],
                                   values=["", "CCA", "FBCCA"], width=25,
                                   font=self.fonts['entry'], state="readonly")
-        algo_combo.grid(row=2, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        algo_combo.grid(row=3, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
         algo_combo.current(0)
         # Threshold
         ttk.Label(form_frame, text="⚙ Threshold:", font=self.fonts['subtitle']).grid(
-            row=3, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+            row=4, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
         threshold_entry = ttk.Entry(form_frame, textvariable=self.info["Threshold"],
                                     width=28, font=self.fonts['entry'])
-        threshold_entry.grid(row=3, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        threshold_entry.grid(row=4, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        command_api_label = ttk.Label(form_frame, text="Control API:", font=self.fonts['subtitle'])
+        command_api_label.grid(row=5, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+        command_api_entry = ttk.Entry(form_frame, textvariable=self.info["Command_API"],
+                                      width=45, font=self.fonts['entry'])
+        command_api_entry.grid(row=5, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        command_api_test_btn = ttk.Button(
+            form_frame,
+            text="Test",
+            command=self.test_command_api,
+            width=8,
+        )
+        command_api_test_btn.grid(row=5, column=2, padx=(0, self.sp(12)), pady=self.sp(10), sticky='w')
         # Realtime button
         realtime_btn = ttk.Button(form_frame, text="▶ Start Realtime",
                                   command=self.Realtime_task,
                                   style="Accent.TButton", width=22)
-        realtime_btn.grid(row=4, column=0, columnspan=3, pady=self.sp(24))
+        realtime_btn.grid(row=6, column=0, columnspan=3, pady=self.sp(24))
 
 
     # ! all Task
+    def test_command_api(self):
+        endpoint = self.info["Command_API"].get().strip()
+        test_message = json.dumps({"type": "Test", "direction": "None"})
+        if not endpoint:
+            self.update_status("API test failed: Please enter the Control API address.", "red")
+            return
+        if not endpoint.startswith(("ws://", "wss://", "http://", "https://")):
+            self.update_status(
+                "API test failed: address must start with ws://, wss://, http://, or https://.",
+                "red",
+            )
+            return
+
+        def check_connection():
+            try:
+                if endpoint.startswith(("ws://", "wss://")):
+                    async def connect_and_close():
+                        async with websockets.connect(
+                            endpoint,
+                            open_timeout=3,
+                            close_timeout=1,
+                            max_size=1024 * 1024,
+                        ) as websocket:
+                            await websocket.send(test_message)
+
+                    asyncio.run(connect_and_close())
+                    result = (True, f"WebSocket test message sent:\n{test_message}\n\n{endpoint}")
+                else:
+                    request = Request(
+                        endpoint,
+                        data=test_message.encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urlopen(request, timeout=3) as response:
+                        result = (200 <= response.status < 400,
+                                  f"Test message sent:\n{test_message}\n\n"
+                                  f"HTTP response {response.status}:\n{endpoint}")
+            except Exception as exc:
+                result = (False, f"API connection failed:\n{exc}")
+
+            def show_result():
+                self.status_bar.config(wraplength=max(400, self.root.winfo_width() - 40))
+                self.update_status(
+                    result[1].replace("\n", " | "),
+                    "green" if result[0] else "red",
+                )
+
+            try:
+                self.root.after(0, show_result)
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=check_connection, daemon=True).start()
+
     def preview_task(self):
         if self.info["Task"].get() == "":    
-            messagebox.showwarning("Missing Algorithm", "Please select an Task!")
+            self.update_status("Please select a task.", "red")
             return
-        else:
-            self.save_to_shared()
-            self.task_queue.put("preview")
-            self.root.destroy()
+        if not self._validate_camera_index():
+            return
+        if (self.info["Task"].get() == "PD-SSVEP"
+                and not self.info["Use_Camera"].get()
+                and not self.info["Frame_API"].get().strip().startswith(("ws://", "wss://"))):
+            self.update_status(
+                "Frame API must be a WebSocket URL starting with ws:// or wss://",
+                "red",
+            )
+            return
+        self.save_to_shared()
+        self.task_queue.put("preview")
+        self.root.destroy()
     
     def Collect_task(self):
         if self.info["Folder_path"].get() == "":
-            messagebox.showwarning("Missing Folder", "Please select a data folder!")
+            self.update_status("Please select a data folder.", "red")
             return
         elif self.info["Task"].get() == "":    
-            messagebox.showwarning("Missing Algorithm", "Please select an Task!")
+            self.update_status("Please select a task.", "red")
+            return
+        elif not self._validate_camera_index():
+            return
+        elif not self._validate_lsl_connection():
             return
         else:
             self.save_to_shared()
@@ -992,10 +1221,10 @@ class SSVEP_GUI:
     
     def Analysis_task(self):
         if self.info["Folder_path"].get() == "":
-            messagebox.showwarning("Missing Folder", "Please select a data folder!")
+            self.update_status("Please select a data folder.", "red")
             return
         elif self.info["Algorithm"].get() == "" or self.info["Algorithm"].get() == "FBCCA":    
-            messagebox.showwarning("Missing Algorithm", "Please select an analysis algorithm!")
+            self.update_status("Please select a supported analysis algorithm.", "red")
             return
         else:
             self.save_to_shared()
@@ -1011,16 +1240,27 @@ class SSVEP_GUI:
             self.load_from_shared() 
             self.display_analysis_results()
             self.update_status("Analysis completed!", "green")
-            messagebox.showinfo("Success", "Analysis completed successfully!")
         else:
             self.root.after(1000, self._check_analysis_complete)
 
     def Realtime_task(self):
         if self.info["Task"].get() == "":    
-            messagebox.showwarning("Missing Algorithm", "Please select an Task!")
+            self.update_status("Please select a task.", "red")
             return
         elif self.info["Algorithm"].get() == "" or self.info["Algorithm"].get() == "FBCCA":    
-            messagebox.showwarning("Missing Algorithm", "Please select an analysis algorithm!")
+            self.update_status("Please select a supported analysis algorithm.", "red")
+            return
+        elif not self._validate_camera_index():
+            return
+        elif (self.info["Task"].get() == "PD-SSVEP"
+                and not self.info["Use_Camera"].get()
+                and not self.info["Frame_API"].get().strip().startswith(("ws://", "wss://"))):
+            self.update_status(
+                "Frame API must be a WebSocket URL starting with ws:// or wss://",
+                "red",
+            )
+            return
+        elif not self._validate_lsl_connection():
             return
         else:
             self.save_to_shared()

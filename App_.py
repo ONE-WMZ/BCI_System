@@ -42,6 +42,8 @@ def run_Task(manager, name:str, gui, info):
     if name != "analysis":
         gui_ = manager.creat_process(function=run_gui, name="SSVEP_GUI", args=(Shared.INFO, Shared.TASK_QUEUE), kwargs={},)
         manager.run_process(gui_)
+        return gui_
+    return gui
 
 
 # ! main
@@ -67,7 +69,7 @@ def main():
                 print("[Main] Exit signal received, shutting down...")
                 break
 
-            run_Task(manager, task_name, gui_, Shared.INFO)
+            gui_ = run_Task(manager, task_name, gui_, Shared.INFO)
 
     except KeyboardInterrupt:
         print("Shutting down...")

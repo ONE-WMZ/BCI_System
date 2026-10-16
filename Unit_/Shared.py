@@ -28,6 +28,10 @@ def init_shared_resources():
             "Threshold": 0.0,  
 
             "Task": "",
+            "Frame_API": "",
+            "Use_Camera": False,
+            "Camera_Index": 1,
+            "Command_API": None,
             "Task_Duration": 10.0,
             "Rest_Duration": 2.0,
 

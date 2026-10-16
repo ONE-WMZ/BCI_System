@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BCI 数据接收记录</title>
+  <style>
+    :root { color-scheme: light; --ink: #172b3a; --muted: #6e8190; --line: #dce7e9; --teal: #087e83; --wash: #f2f8f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(ellipse at 90% 0%, #d9efea 0, transparent 35%), var(--wash); color: var(--ink); font: 15px/1.55 "Segoe UI", "Microsoft YaHei", sans-serif; }
+    main { width: min(1000px, calc(100% - 36px)); margin: 0 auto; padding: 42px 0 64px; }
+    header, .card-head, .record-meta { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    header { margin-bottom: 26px; }
+    .eyebrow { color: var(--teal); font-size: 12px; font-weight: 750; letter-spacing: .14em; }
+    h1 { margin: 5px 0 0; font-size: clamp(27px, 4vw, 38px); }
+    .status, .counter { padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--muted); font-size: 13px; white-space: nowrap; }
+    .dot { display: inline-block; width: 9px; height: 9px; margin-right: 7px; border-radius: 50%; background: #32a875; }
+    .card { overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: white; box-shadow: 0 10px 30px #183e4b0a; }
+    .card-head { padding: 20px 22px 16px; border-bottom: 1px solid #edf2f2; }
+    h2 { margin: 0; font-size: 17px; }
+    .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .counter { border: 0; border-radius: 7px; background: #eaf5f3; color: #075e64; font-weight: 700; }
+    .stream { max-height: 72vh; min-height: 235px; overflow: auto; padding: 10px 22px 20px; }
+    .empty { display: grid; min-height: 200px; place-items: center; color: var(--muted); text-align: center; }
+    .record { padding: 16px 0; border-bottom: 1px solid #edf2f2; }
+    .record:last-child { border-bottom: 0; }
+    .record-meta { justify-content: flex-start; margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+    .record-id { color: #075e64; font-family: Consolas, monospace; }
+    pre { margin: 0; padding: 12px 14px; overflow: auto; border-radius: 10px; background: #f5f8f8; color: #243d4d; font: 12px/1.55 Consolas, monospace; }
+    @media (max-width: 600px) { main { padding-top: 27px; } header { align-items: flex-start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">BCI SYSTEM · HTTP</div>
+        <h1>数据接收记录</h1>
+      </div>
+      <div class="status"><span class="dot" id="status-dot"></span><span id="service-status">正在连接</span></div>
+    </header>
+
+    <article class="card">
+      <div class="card-head">
+        <div><h2>已接收的数据</h2><p class="sub">每 2 秒自动刷新，最多显示最近 100 条。发送端请 POST JSON 至 <code id="receiver-url"></code></p></div>
+        <span class="counter" id="record-count">0 条</span>
+      </div>
+      <div class="stream" id="records" aria-live="polite">
+        <div class="empty">暂无接收数据</div>
+      </div>
+    </article>
+  </main>
+
+  <script>
+    const recordsEl = document.getElementById('records');
+    const countEl = document.getElementById('record-count');
+    const statusEl = document.getElementById('service-status');
+    const statusDot = document.getElementById('status-dot');
+    document.getElementById('receiver-url').textContent = `${location.origin}/api/data`;
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, char => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[char]);
+    }
+
+    function renderRecords(items) {
+      countEl.textContent = `${items.length} 条`;
+      if (!items.length) {
+        recordsEl.innerHTML = '<div class="empty">暂无接收数据</div>';
+        return;
+      }
+      recordsEl.innerHTML = items.map(item => `
+        <section class="record">
+          <div class="record-meta"><span>${escapeHtml(item.received_at)}</span><span class="record-id">ID: ${escapeHtml(item.id.slice(0, 8))}</span></div>
+          <pre>${escapeHtml(JSON.stringify(item.payload, null, 2))}</pre>
+        </section>`).join('');
+    }
+
+    async function refreshRecords() {
+      try {
+        const response = await fetch('/api/data');
+        if (!response.ok) throw new Error('接口不可用');
+        const result = await response.json();
+        renderRecords(result.items);
+        statusEl.textContent = '服务运行中';
+        statusDot.style.background = '#32a875';
+      } catch (_error) {
+        statusEl.textContent = '连接中断';
+        statusDot.style.background = '#d45b5b';
+      }
+    }
+
+    refreshRecords();
+    window.setInterval(refreshRecords, 2000);
+  </script>
+</body>
+</html>

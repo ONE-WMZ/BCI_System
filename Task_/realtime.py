@@ -1,148 +1,23 @@
-import cv2
 import time
-import json
-import asyncio
-import threading
-import websockets
-import webbrowser
-import http.server
 import numpy as np
-import socketserver
 from collections import deque
 from psychopy import core, event, visual
 
 from Unit_.LSL_ import LSL_Recorder
 from Unit_.Stimuli_ import Stimuli_SSVEP
 from Unit_.CCA_ import cca_ssvep
+from Unit_.Get_Frame import Get_Camera, Get_Frame
+from Unit_.Put_Command import Put_Command
 
 
-# ! Web Services
-# Shared state — used by all tasks
-latest_frame = None
-clients = set()
+# ! Realtime state
 score = 0
 current_pred_dir = "+"
-ws_loop = None
-frame_lock = threading.Lock()
-_web_services_started = False
-
-# WebSocket handler (receive image + score) 
-async def _ws_handler(websocket):
-    global latest_frame, score
-    clients.add(websocket)
-    try:
-        async for message in websocket:
-            try:
-                # receive image (binary)
-                if isinstance(message, bytes):
-                    np_arr = np.frombuffer(message, np.uint8)
-                    frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        frame = frame.astype(np.float32) / 127.5 - 1.0
-                        frame = cv2.flip(frame, 0)   # vertical flip
-                        with frame_lock:
-                            latest_frame = frame
-                # receive JSON message (score)
-                elif isinstance(message, str):
-                    data = json.loads(message)
-                    if data.get("type") == "score":
-                        new_score = data.get("score", 0)
-                        if new_score != score:
-                            now = time.strftime('%H:%M:%S')
-                            print(f"[SCORE] {score} → {new_score} | exp_t={core.getTime():.3f}s | {now}")
-                        score = new_score
-            except Exception as e:
-                print(f"[WS handler error] {e}")
-    finally:
-        clients.remove(websocket)
-
-async def _start_ws():
-    global ws_loop
-    ws_loop = asyncio.get_running_loop()
-    async with websockets.serve(_ws_handler, "localhost", 8765):
-        print("WebSocket started: ws://localhost:8765")
-        await asyncio.Future()
-
-def _run_ws():
-    asyncio.run(_start_ws())
-
-#  HTTP server
-def _start_http():
-    PORT = 8000
-    Handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print("HTTP server: http://localhost:8000")
-        httpd.serve_forever()
-
-
-#  Auto-open browser 
-def _open_browser():
-    time.sleep(1.0)  # wait for servers to start
-    webbrowser.open("http://localhost:8000/Viz_/Unit_/game.html")
-
-
-#  Send control command to WebSocket clients 
-async def _send_control(direction):
-    if len(clients) == 0:
-        return
-    msg = json.dumps({
-        "type": "control",
-        "direction": direction
-    })
-    await asyncio.gather(*[ws.send(msg) for ws in clients])
-
-
-# Thread-safe: send control command from the PsychoPy main thread.
-def send_control_sync(direction):
-    global ws_loop
-    if ws_loop is None:
-        print("[WARN] ws_loop not ready yet")
-        return
-    try:
-        future = asyncio.run_coroutine_threadsafe(_send_control(direction), ws_loop)
-        future.result(timeout=2)
-        now = time.strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[ACTION] {direction} | exp_t={core.getTime():.3f}s | {now}")
-    except Exception as e:
-        print(f"[send_control error] {e}")
-
-
-# Send shutdown message to all WebSocket clients (close game page)
-async def _send_shutdown():
-    if len(clients) == 0:
-        return
-    msg = json.dumps({"type": "shutdown"})
-    await asyncio.gather(*[ws.send(msg) for ws in clients])
-
-
-def send_shutdown_sync():
-    global ws_loop
-    if ws_loop is None:
-        print("[WARN] ws_loop not ready, cannot send shutdown")
-        return
-    try:
-        future = asyncio.run_coroutine_threadsafe(_send_shutdown(), ws_loop)
-        future.result(timeout=2)
-        print("[SHUTDOWN] Game page close command sent")
-    except Exception as e:
-        print(f"[send_shutdown error] {e}")
-
-
-# Start HTTP + WebSocket servers + open browser 
-def start_web_services():
-    global _web_services_started
-    if _web_services_started:
-        return
-    _web_services_started = True
-    threading.Thread(target=_run_ws, daemon=True).start()
-    threading.Thread(target=_start_http, daemon=True).start()
-    threading.Thread(target=_open_browser, daemon=True).start()
 
 
 # ! Task-realtime 
 def Task_realtime(info_):
-    global latest_frame, score, current_pred_dir
+    global score, current_pred_dir
     # Select_screen = info_.get("Select_screen")
     Device_name = info_.get("Device_name")
     Task = info_.get("Task")
@@ -172,8 +47,17 @@ def Task_realtime(info_):
     data_buffer = deque(maxlen=max_samples)
     last_analysis_time = core.getTime()
     analysis_interval = 0.5
-    # Start web services
-    start_web_services()
+    
+    command_client = None
+    command_api = info_.get("Command_API")
+    if Task in {"SSVEP", "PD-SSVEP"} and command_api:
+        try:
+            command_client = Put_Command(command_api)
+            command_client.start()
+        except ValueError as exc:
+            print(f"[Realtime] {exc}")
+    if Task == "SSVEP" and command_client is None:
+        print("[Realtime] Command_API is not configured; game control is disabled")
 
     # ! SSVEP
     if Task == "SSVEP":
@@ -222,19 +106,29 @@ def Task_realtime(info_):
                             current_pred_dir = pred_dir_3s
                             detected = True
                     if detected:
-                        send_control_sync(current_pred_dir)
+                        if command_client is not None:
+                            command_client.send_direction(current_pred_dir)
                         data_buffer.clear()
                     last_analysis_time = t
         finally:
-            send_shutdown_sync()
+            if command_client is not None:
+                command_client.stop()
             time.sleep(0.5)
             stimuli.exit()
 
     # ! PD-SSVEP
     elif Task == "PD-SSVEP":
-        # Reset per-run state
-        with frame_lock:
-            latest_frame = None
+        try:
+            frame_client = (Get_Camera(int(info_.get("Camera_Index", 1)))
+                            if info_.get("Use_Camera", False)
+                            else Get_Frame(info_.get("Frame_API", "")))
+            frame_client.start()
+        except (ValueError, RuntimeError) as exc:
+            print(f"[PD-SSVEP realtime] {exc}")
+            if command_client is not None:
+                command_client.stop()
+            stimuli.exit()
+            return
         score = 0
         current_pred_dir = "-"
         # SSVEP stimuli
@@ -286,8 +180,7 @@ def Task_realtime(info_):
                 # stim update
                 stimuli.update_stimuli(stimuli_dict, t)
                 # plot game
-                with frame_lock:
-                    _frame = latest_frame
+                _frame = frame_client.get_frame()
                 if _frame is not None:
                     game_stim.image = _frame
                 border.draw()
@@ -331,13 +224,16 @@ def Task_realtime(info_):
                                 current_pred_dir = pred_dir_3s
                                 detected = True
                         if detected:
-                            send_control_sync(current_pred_dir)
+                            if command_client is not None:
+                                command_client.send_direction(current_pred_dir)
                             data_buffer.clear()
                         last_analysis_time = t
                 except Exception as e:
                     print(f"[EEG Analysis error] {e}")
         finally:
-            send_shutdown_sync()
+            frame_client.stop()
+            if command_client is not None:
+                command_client.stop()
             time.sleep(0.5)
             stimuli.exit()
 
