@@ -7,13 +7,16 @@ from urllib.parse import urlsplit
 import aiohttp
 import websockets
 
+from Unit_.Command_API import load_commands, send_command
+
 
 class Put_Command:
     def __init__(self, endpoint):
         self.endpoint = (endpoint or "").strip()
         scheme = urlsplit(self.endpoint).scheme.lower()
+        self.commands = None
         if scheme not in {"ws", "wss", "http", "https"}:
-            raise ValueError("Control API must start with ws://, wss://, http://, or https://")
+            self.commands = load_commands(self.endpoint)
         self._is_http = scheme in {"http", "https"}
         self._queue = queue.Queue()
         self._stop_event = threading.Event()
@@ -24,7 +27,17 @@ class Put_Command:
 
     def send_direction(self, direction):
         if not self._stop_event.is_set():
-            self._queue.put(json.dumps({"type": "control", "direction": direction}))
+            if self.commands is not None:
+                normalized = direction.strip().casefold()
+                name = next((name for name in self.commands
+                             if name.strip().casefold() == normalized), None)
+                if name is None:
+                    print(f"[GameCommand] No command configured for direction: {direction}", flush=True)
+                    return
+                self._queue.put(name)
+                print(f"[GameCommand] Queued direction {direction} -> {name}", flush=True)
+            else:
+                self._queue.put(json.dumps({"type": "control", "direction": direction}))
 
     def stop(self):
         self._stop_event.set()
@@ -33,6 +46,9 @@ class Put_Command:
         asyncio.run(self._send_loop())
 
     async def _send_loop(self):
+        if self.commands is not None:
+            await self._send_commands_loop()
+            return
         if self._is_http:
             await self._send_http_loop()
             return
@@ -66,6 +82,18 @@ class Put_Command:
                 if not self._stop_event.is_set():
                     print(f"[GameCommand] Connection failed: {exc}; retrying in 1 second")
                     await asyncio.sleep(1)
+
+    async def _send_commands_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                name = await asyncio.to_thread(self._queue.get, True, 0.5)
+            except queue.Empty:
+                continue
+            try:
+                status = await asyncio.to_thread(send_command, self.commands[name])
+                print(f"[GameCommand] {name}: HTTP {status}")
+            except Exception as exc:
+                print(f"[GameCommand] {name} failed: {exc}")
 
     async def _send_http_loop(self):
         pending_message = None

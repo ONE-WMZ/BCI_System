@@ -5,7 +5,7 @@ from uuid import uuid4
 from flask import Flask, jsonify, render_template, request
 
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder=".")
 records = []
 
 

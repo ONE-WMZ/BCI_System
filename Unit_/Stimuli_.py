@@ -42,7 +42,7 @@ class Stimuli_SSVEP:
         if abs(int(self.refresh_rate) - 60) <= 5:
             self.freqs = {'up': 6, 'down': 7.5, 'left': 10, 'right': 15}
         elif abs(int(self.refresh_rate) - 120) <= 5:
-            self.freqs = {'up': 8, 'down': 10, 'left': 12, 'right': 15}
+            self.freqs = {'up': 8, 'down': 10, 'left': 12, 'right': 15}    #15,12,10,8
         elif abs(int(self.refresh_rate) - 144) <= 5:
             self.freqs = {'up': 8, 'down': 9.6, 'left': 14.4, 'right': 18} 
         else:

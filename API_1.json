@@ -1,0 +1,44 @@
+{
+    "Test": {
+        "type": "GET",
+        "url": "http://192.168.137.107/api/car/status",
+        "headers": {},
+        "param": {},
+        "body": {}
+    },
+    "First": {
+        "type": "POST",
+        "url": "http://192.168.137.107/api/car/unlock",
+        "headers": {},
+        "param": {},
+        "body": {}
+    },
+    "Up": {
+        "type": "POST",
+        "url": "http://192.168.137.107/api/car/move",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": { "direction_deg": 0, "distance_mm": 950, "max_speed_mm_s":550 }
+    },
+    "Down": {
+        "type": "POST",
+        "url": "http://192.168.137.107/api/car/move",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": { "direction_deg": 180, "distance_mm": 950, "max_speed_mm_s":550 }
+    },
+    "Left": {
+        "type": "POST",
+        "url": "http://192.168.137.107/api/car/rotate",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"angle_deg":90,"max_angular_speed_dps":20}
+    },
+    "Right": {
+        "type": "POST",
+        "url": "http://192.168.137.107/api/car/rotate",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"angle_deg":-90,"max_angular_speed_dps":20}
+    }
+}

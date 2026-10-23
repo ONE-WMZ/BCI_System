@@ -1,0 +1,44 @@
+{
+    "Test": {
+        "type": "GET",
+        "url": "http://192.168.31.105/api/car/status",
+        "headers": {},
+        "param": {},
+        "body": {}
+    },
+    "First": {
+        "type": "POST",
+        "url": "http://192.168.31.105/api/car/unlock",
+        "headers": {},
+        "param": {},
+        "body": {}
+    },
+    "Up": {
+        "type": "POST",
+        "url": "http://192.168.31.105/api/car/move_timed",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"direction_deg": 0, "speed_mm_s": 600, "duration_ms": 2000}
+    },
+    "Down": {
+        "type": "POST",
+        "url": "http://192.168.31.105/api/car/move_timed",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"direction_deg": 180, "speed_mm_s": 600, "duration_ms": 2000}    
+    },
+    "Left": {
+        "type": "POST",
+        "url": "http://192.168.31.105/api/car/rotate",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"angle_deg":-30,"max_angular_speed_dps":20}
+    },
+    "Right": {
+        "type": "POST",
+        "url": "http://192.168.31.105/api/car/rotate",
+        "headers": {"Content-Type ": "application/json"},
+        "param": {},
+        "body": {"angle_deg":30,"max_angular_speed_dps":20}
+    }
+}

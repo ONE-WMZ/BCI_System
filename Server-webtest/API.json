@@ -1,0 +1,37 @@
+{
+    "Test": {
+        "type": "GET",
+        "url": "http://127.0.0.1:5000/api/data",
+        "headers": {},
+        "param": {},
+        "body": {}
+    },
+    "Up": {
+        "type": "POST",
+        "url": "http://127.0.0.1:5000/api/data",
+        "headers": {"Content-Type": "application/json"},
+        "param": {},
+        "body": {"type": "control", "direction": "up"}
+    },
+    "Down": {
+        "type": "POST",
+        "url": "http://127.0.0.1:5000/api/data",
+        "headers": {"Content-Type": "application/json"},
+        "param": {},
+        "body": {"type": "control", "direction": "down"}
+    },
+    "Left": {
+        "type": "POST",
+        "url": "http://127.0.0.1:5000/api/data",
+        "headers": {"Content-Type": "application/json"},
+        "param": {},
+        "body": {"type": "control", "direction": "left"}
+    },
+    "Right": {
+        "type": "POST",
+        "url": "http://127.0.0.1:5000/api/data",
+        "headers": {"Content-Type": "application/json"},
+        "param": {},
+        "body": {"type": "control", "direction": "right"}
+    }
+}

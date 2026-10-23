@@ -1,6 +1,8 @@
+import os
 import time
 import numpy as np
 from collections import deque
+from datetime import datetime
 from psychopy import core, event, visual
 
 from Unit_.LSL_ import LSL_Recorder
@@ -22,6 +24,28 @@ def Task_realtime(info_):
     Device_name = info_.get("Device_name")
     Task = info_.get("Task")
     best_th = info_.get("Threshold", 0.5)
+    folder_path = info_.get("Folder_path")
+    if not folder_path:
+        print("[Realtime] Select a data folder before starting realtime.")
+        return
+    realtime_dir = os.path.join(folder_path, "realtime")
+    os.makedirs(realtime_dir, exist_ok=True)
+    recognition_index = 0
+
+    def save_recognition(direction, eeg):
+        nonlocal recognition_index
+        while True:
+            recognition_index += 1
+            filename = f"{datetime.now():%Y%m%d_%H%M%S_%f}_{recognition_index:06d}_{direction}.npy"
+            path = os.path.join(realtime_dir, filename)
+            try:
+                target = open(path, "xb")
+            except FileExistsError:
+                continue
+            with target:
+                np.save(target, eeg)
+            print(f"[Realtime] Saved {direction}: {path} | shape={eeg.shape}")
+            return
     # Init LSL
     if not Device_name:
         print("[No LSL stream]")
@@ -54,7 +78,7 @@ def Task_realtime(info_):
         try:
             command_client = Put_Command(command_api)
             command_client.start()
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             print(f"[Realtime] {exc}")
     if Task == "SSVEP" and command_client is None:
         print("[Realtime] Command_API is not configured; game control is disabled")
@@ -94,6 +118,7 @@ def Task_realtime(info_):
                         pred_dir_2s, scores_2s = Algorithm_.classify(eeg_2s)
                         if scores_2s[pred_dir_2s] > best_th:
                             current_pred_dir = pred_dir_2s
+                            detected_eeg = stim_data[-required_2s_samples:, :].copy()
                             detected = True
                     # 3s
                     if not detected and len(data_buffer) >= required_3s_samples:
@@ -104,8 +129,10 @@ def Task_realtime(info_):
                         pred_dir_3s, scores_3s = Algorithm_.classify(eeg_3s)
                         if scores_3s[pred_dir_3s] > best_th:
                             current_pred_dir = pred_dir_3s
+                            detected_eeg = stim_data[-required_3s_samples:, :].copy()
                             detected = True
                     if detected:
+                        save_recognition(current_pred_dir, detected_eeg)
                         if command_client is not None:
                             command_client.send_direction(current_pred_dir)
                         data_buffer.clear()
@@ -132,7 +159,7 @@ def Task_realtime(info_):
         score = 0
         current_pred_dir = "-"
         # SSVEP stimuli
-        stimuli = Stimuli_SSVEP(block_size=200)
+        # stimuli = Stimuli_SSVEP(block_size=200)
         stimuli.countdown_text(text='Ready', show_time=True, seconds=3)
         stimuli_dict = stimuli.create_stimuli()
         # game block
@@ -212,6 +239,7 @@ def Task_realtime(info_):
                             pred_dir_2s, score_2s = Algorithm_.classify(eeg_2s)
                             if score_2s[pred_dir_2s] > best_th:
                                 current_pred_dir = pred_dir_2s
+                                detected_eeg = stim_data[-required_2s_samples:, :].copy()
                                 detected = True
                         # 3s
                         if not detected and len(data_buffer) >= required_3s_samples:
@@ -222,8 +250,10 @@ def Task_realtime(info_):
                             pred_dir_3s, score_3s = Algorithm_.classify(eeg_3s)
                             if score_3s[pred_dir_3s] > best_th:
                                 current_pred_dir = pred_dir_3s
+                                detected_eeg = stim_data[-required_3s_samples:, :].copy()
                                 detected = True
                         if detected:
+                            save_recognition(current_pred_dir, detected_eeg)
                             if command_client is not None:
                                 command_client.send_direction(current_pred_dir)
                             data_buffer.clear()

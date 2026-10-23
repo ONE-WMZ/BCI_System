@@ -1,13 +1,12 @@
 import os 
-import asyncio
-import json
+import queue
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog
-import websockets
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
+from Unit_.Command_API import load_commands, send_command
 from Unit_.LSL_ import LSL_Recorder
 from screeninfo import get_monitors
 
@@ -230,6 +229,7 @@ class SSVEP_GUI:
             bd=max(1, self.sp(2)),
             relief=tk.SUNKEN,
             anchor=tk.W,
+            justify=tk.LEFT,
             font=self.fonts['status'],
             bg="#e0e0e0",
             fg=self.colors['primary'],
@@ -237,6 +237,17 @@ class SSVEP_GUI:
             pady=self.sp(8)
         )
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar.bind("<Configure>", self._resize_status_bar)
+
+    def _resize_status_bar(self, _event=None):
+        width = self.status_bar.winfo_width()
+        if width <= 1:
+            return
+        inset = sum(self.status_bar.winfo_pixels(self.status_bar.cget(option))
+                    for option in ("padx", "borderwidth", "highlightthickness"))
+        wraplength = max(1, width - 2 * inset)
+        if int(self.status_bar.cget("wraplength")) != wraplength:
+            self.status_bar.config(wraplength=wraplength)
 
     # ! Resize scaling
     @staticmethod
@@ -290,6 +301,8 @@ class SSVEP_GUI:
         def capture(widget):
             options = {}
             for option in dimension_options | {"font"}:
+                if widget is self.status_bar and option == "wraplength":
+                    continue
                 try:
                     options[option] = widget.cget(option)
                 except tk.TclError:
@@ -396,6 +409,8 @@ class SSVEP_GUI:
         style.configure("TEntry", font=self.fonts["entry"], padding=self.sp(8))
         style.configure("TCombobox", font=self.fonts["entry"], padding=self.sp(8))
         self.root.option_add("*TCombobox*Listbox.font", self.fonts["entry"])
+        if hasattr(self, "command_combo"):
+            self._configure_command_font()
         if hasattr(self, "results_text"):
             for tag, font_key in (
                 ("title", "result_title"),
@@ -450,10 +465,10 @@ class SSVEP_GUI:
     def update_status(self, message, color="black"):
         # updata status
         self.status_bar.config(
-            text=f"  {message}",
+            text=message,
             fg=color,
-            wraplength=max(400, self.root.winfo_width() - 40),
         )
+        self._resize_status_bar()
         self.status_bar.update_idletasks()
     
     def select_folder(self):
@@ -655,7 +670,11 @@ class SSVEP_GUI:
         self.info["Use_Camera"].set(bool(self.shared_info.get("Use_Camera", False)))
         self.info["Camera_Index"].set(int(self.shared_info.get("Camera_Index", 1)))
         self.info["Camera_Index_Text"].set(str(self.shared_info.get("Camera_Index", 1)))
-        self.info["Command_API"].set(str(self.shared_info.get("Command_API") or ""))
+        command_api = str(self.shared_info.get("Command_API") or "")
+        if hasattr(self, "command_combo"):
+            self._load_command_api(command_api)
+        else:
+            self.info["Command_API"].set(command_api)
         self.info["Task_Duration"].set(float(self.shared_info.get("Task_Duration", 10.0)))
         self.info["Rest_Duration"].set(float(self.shared_info.get("Rest_Duration", 2.0)))
 
@@ -1113,77 +1132,133 @@ class SSVEP_GUI:
         command_api_label = ttk.Label(form_frame, text="Control API:", font=self.fonts['subtitle'])
         command_api_label.grid(row=5, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
         command_api_entry = ttk.Entry(form_frame, textvariable=self.info["Command_API"],
-                                      width=45, font=self.fonts['entry'])
+                                      width=45, font=self.fonts['entry'], state="readonly")
         command_api_entry.grid(row=5, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
-        command_api_test_btn = ttk.Button(
+        self.command_api_upload_btn = ttk.Button(
+            form_frame, text="Upload JSON", command=self.select_command_api,
+        )
+        self.command_api_upload_btn.grid(
+            row=5, column=2, padx=(0, self.sp(12)), pady=self.sp(10), sticky='ew')
+        ttk.Label(form_frame, text="Command:", font=self.fonts['subtitle']).grid(
+            row=6, column=0, padx=self.sp(12), pady=self.sp(10), sticky='e')
+        self.command_combo = ttk.Combobox(
+            form_frame, values=[], width=25, font=self.fonts['monospace'], state="readonly",
+        )
+        self.command_combo.grid(row=6, column=1, padx=self.sp(12), pady=self.sp(10), sticky='ew')
+        self._configure_command_font()
+        self.command_api_test_btn = ttk.Button(
             form_frame,
             text="Test",
             command=self.test_command_api,
             width=8,
+            state=tk.DISABLED,
         )
-        command_api_test_btn.grid(row=5, column=2, padx=(0, self.sp(12)), pady=self.sp(10), sticky='w')
+        self.command_api_test_btn.grid(row=6, column=2, padx=(0, self.sp(12)), pady=self.sp(10), sticky='ew')
+        self.command_definitions = {}
+        self.command_names = []
+        if self.info["Command_API"].get():
+            self._load_command_api(self.info["Command_API"].get())
         # Realtime button
         realtime_btn = ttk.Button(form_frame, text="▶ Start Realtime",
                                   command=self.Realtime_task,
                                   style="Accent.TButton", width=22)
-        realtime_btn.grid(row=6, column=0, columnspan=3, pady=self.sp(24))
+        realtime_btn.grid(row=7, column=0, columnspan=3, pady=self.sp(24))
 
 
     # ! all Task
+    def _configure_command_font(self):
+        self.command_combo.configure(font=self.fonts["monospace"])
+        popdown = self.root.tk.call("ttk::combobox::PopdownWindow", self.command_combo)
+        self.root.tk.call(f"{popdown}.f.l", "configure", "-font", self.fonts["monospace"])
+
+    def select_command_api(self):
+        path = filedialog.askopenfilename(
+            title="Select Control API JSON", filetypes=[("JSON files", "*.json")],
+        )
+        if path:
+            self._load_command_api(path)
+
+    def _load_command_api(self, path):
+        if not path:
+            self.info["Command_API"].set("")
+            self.command_definitions = {}
+            self.command_names = []
+            self.command_combo.config(values=[])
+            self.command_combo.set("")
+            self.command_api_test_btn.config(state=tk.DISABLED)
+            return
+        try:
+            commands = load_commands(path)
+        except (OSError, ValueError) as exc:
+            self.update_status(f"Could not load Control API JSON: {exc}", "red")
+            return
+        self.command_definitions = commands
+        self.command_names = list(commands)
+        self.info["Command_API"].set(path)
+        name_width = max(len(name) for name in commands)
+        url_width = max(len(command["url"]) for command in commands.values())
+        self.command_combo.config(values=[
+            f"{name:<{name_width}}: {command['url']:<{url_width}} （{command['type'].upper()}）"
+            for name, command in commands.items()
+        ])
+        self.command_combo.set("")
+        self.command_api_test_btn.config(state=tk.NORMAL)
+        self.update_status(
+            f"Loaded {len(commands)} commands. Select a command, then click Test.", "green",
+        )
+
     def test_command_api(self):
-        endpoint = self.info["Command_API"].get().strip()
-        test_message = json.dumps({"type": "Test", "direction": "None"})
-        if not endpoint:
-            self.update_status("API test failed: Please enter the Control API address.", "red")
+        selected = self.command_combo.current()
+        if selected < 0:
+            self.update_status("Please select a command to test.", "red")
             return
-        if not endpoint.startswith(("ws://", "wss://", "http://", "https://")):
-            self.update_status(
-                "API test failed: address must start with ws://, wss://, http://, or https://.",
-                "red",
-            )
-            return
+        name = self.command_names[selected]
+        command = self.command_definitions[name]
+        results = queue.Queue()
+        self.command_api_test_btn.config(state=tk.DISABLED)
+        self.command_api_upload_btn.config(state=tk.DISABLED)
+        self.update_status(f"Testing {name}...", "blue")
 
-        def check_connection():
+        def check_command():
             try:
-                if endpoint.startswith(("ws://", "wss://")):
-                    async def connect_and_close():
-                        async with websockets.connect(
-                            endpoint,
-                            open_timeout=3,
-                            close_timeout=1,
-                            max_size=1024 * 1024,
-                        ) as websocket:
-                            await websocket.send(test_message)
-
-                    asyncio.run(connect_and_close())
-                    result = (True, f"WebSocket test message sent:\n{test_message}\n\n{endpoint}")
-                else:
-                    request = Request(
-                        endpoint,
-                        data=test_message.encode("utf-8"),
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    with urlopen(request, timeout=3) as response:
-                        result = (200 <= response.status < 400,
-                                  f"Test message sent:\n{test_message}\n\n"
-                                  f"HTTP response {response.status}:\n{endpoint}")
+                status, body = send_command(command, include_body=True)
+                message = f"{name}: HTTP {status}"
+                if body:
+                    message += f" | {body}"
+                results.put((True, message))
+            except HTTPError as exc:
+                try:
+                    with exc:
+                        encoding = exc.headers.get_content_charset() or "utf-8"
+                        body = exc.read(8192).decode(encoding, errors="replace").strip()
+                except Exception as read_exc:
+                    body = f"Could not read response body: {read_exc}"
+                message = f"{name}: failed ({exc})"
+                if body:
+                    message += f" | {body}"
+                results.put((False, message))
             except Exception as exc:
-                result = (False, f"API connection failed:\n{exc}")
+                results.put((False, f"{name}: failed ({exc})"))
 
-            def show_result():
-                self.status_bar.config(wraplength=max(400, self.root.winfo_width() - 40))
-                self.update_status(
-                    result[1].replace("\n", " | "),
-                    "green" if result[0] else "red",
-                )
-
+        def show_result():
             try:
-                self.root.after(0, show_result)
-            except tk.TclError:
-                pass
+                succeeded, message = results.get_nowait()
+            except queue.Empty:
+                self.root.after(100, show_result)
+                return
+            self.command_api_test_btn.config(state=tk.NORMAL if self.command_definitions else tk.DISABLED)
+            self.command_api_upload_btn.config(state=tk.NORMAL)
+            summary, separator, body = message.partition(" | ")
+            summary = " ".join(summary.split())
+            if separator:
+                preview = " ".join(body.split())
+                if len(preview) > 160:
+                    preview = preview[:160] + "…"
+                summary += f" | {preview}"
+            self.update_status(summary, "green" if succeeded else "red")
 
-        threading.Thread(target=check_connection, daemon=True).start()
+        threading.Thread(target=check_command, daemon=True).start()
+        self.root.after(100, show_result)
 
     def preview_task(self):
         if self.info["Task"].get() == "":    
@@ -1244,7 +1319,10 @@ class SSVEP_GUI:
             self.root.after(1000, self._check_analysis_complete)
 
     def Realtime_task(self):
-        if self.info["Task"].get() == "":    
+        if not self.info["Folder_path"].get().strip():
+            self.update_status("Please select a data folder on the Data Collect page.", "red")
+            return
+        elif self.info["Task"].get() == "":
             self.update_status("Please select a task.", "red")
             return
         elif self.info["Algorithm"].get() == "" or self.info["Algorithm"].get() == "FBCCA":    
